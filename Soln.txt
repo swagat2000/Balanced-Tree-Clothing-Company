@@ -1,0 +1,248 @@
+WITH total_sales AS (
+    SELECT 
+        SUM(qty) AS total_quantity_sold,
+        SUM(price * qty) AS total_revenue_before_discount,
+        SUM(discount * qty) AS total_discount_amount
+    FROM balanced_tree.sales
+),
+unique_transactions AS (
+    SELECT 
+        COUNT(DISTINCT txn_id) AS unique_transactions
+    FROM balanced_tree.sales
+),
+average_products_per_transaction AS (
+    SELECT 
+        AVG(product_count) AS avg_unique_products_per_transaction
+    FROM (
+        SELECT 
+            txn_id, 
+            COUNT(DISTINCT prod_id) AS product_count
+        FROM balanced_tree.sales
+        GROUP BY txn_id
+    ) subquery
+),
+percentile_revenue AS (
+    SELECT 
+        PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY revenue_per_txn) AS p25_revenue,
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY revenue_per_txn) AS p50_revenue,
+        PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY revenue_per_txn) AS p75_revenue
+    FROM (
+        SELECT 
+            txn_id, 
+            SUM(price * qty) AS revenue_per_txn
+        FROM balanced_tree.sales
+        GROUP BY txn_id
+    ) subquery
+),
+average_discount_per_transaction AS (
+    SELECT 
+        AVG(discount_value) AS avg_discount_per_transaction
+    FROM (
+        SELECT 
+            txn_id, 
+            SUM(discount * qty) AS discount_value
+        FROM balanced_tree.sales
+        GROUP BY txn_id
+    ) subquery
+),
+member_split AS (
+    SELECT 
+        member,
+        COUNT(*) AS transaction_count,
+        COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () AS percentage_split
+    FROM balanced_tree.sales
+    GROUP BY member
+),
+average_revenue_member_non_member AS (
+    SELECT 
+        member,
+        AVG(revenue_per_txn) AS avg_revenue
+    FROM (
+        SELECT 
+            txn_id, 
+            member,
+            SUM(price * qty) AS revenue_per_txn
+        FROM balanced_tree.sales
+        GROUP BY txn_id, member
+    ) subquery
+    GROUP BY member
+),
+top_products_by_revenue AS (
+    SELECT 
+        prod_id,
+        SUM(price * qty) AS total_revenue
+    FROM balanced_tree.sales
+    GROUP BY prod_id
+    ORDER BY total_revenue DESC
+    LIMIT 3
+),
+segment_analysis AS (
+    SELECT 
+        ph.segment_name,
+        SUM(s.qty) AS total_quantity,
+        SUM(s.price * s.qty) AS total_revenue,
+        SUM(s.discount * s.qty) AS total_discount
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    JOIN balanced_tree.product_hierarchy ph ON pd.segment_id = ph.id
+    GROUP BY ph.segment_name
+),
+top_product_per_segment AS (
+    SELECT 
+        ph.segment_name,
+        pd.product_name,
+        SUM(s.qty) AS total_quantity
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    JOIN balanced_tree.product_hierarchy ph ON pd.segment_id = ph.id
+    GROUP BY ph.segment_name, pd.product_name
+    ORDER BY ph.segment_name, total_quantity DESC
+),
+category_analysis AS (
+    SELECT 
+        ph.category_name,
+        SUM(s.qty) AS total_quantity,
+        SUM(s.price * s.qty) AS total_revenue,
+        SUM(s.discount * s.qty) AS total_discount
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    JOIN balanced_tree.product_hierarchy ph ON pd.category_id = ph.id
+    GROUP BY ph.category_name
+),
+top_product_per_category AS (
+    SELECT 
+        ph.category_name,
+        pd.product_name,
+        SUM(s.qty) AS total_quantity
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    JOIN balanced_tree.product_hierarchy ph ON pd.category_id = ph.id
+    GROUP BY ph.category_name, pd.product_name
+    ORDER BY ph.category_name, total_quantity DESC
+),
+revenue_split_by_product_segment AS (
+    SELECT 
+        ph.segment_name,
+        pd.product_name,
+        SUM(s.price * s.qty) AS total_revenue,
+        SUM(s.price * s.qty) * 100.0 / SUM(SUM(s.price * s.qty)) OVER (PARTITION BY ph.segment_name) AS percentage_split
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    JOIN balanced_tree.product_hierarchy ph ON pd.segment_id = ph.id
+    GROUP BY ph.segment_name, pd.product_name
+),
+revenue_split_by_segment_category AS (
+    SELECT 
+        ph.category_name,
+        ph.segment_name,
+        SUM(s.price * s.qty) AS total_revenue,
+        SUM(s.price * s.qty) * 100.0 / SUM(SUM(s.price * s.qty)) OVER (PARTITION BY ph.category_name) AS percentage_split
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    JOIN balanced_tree.product_hierarchy ph ON pd.segment_id = ph.id
+    GROUP BY ph.category_name, ph.segment_name
+),
+revenue_split_by_category AS (
+    SELECT 
+        ph.category_name,
+        SUM(s.price * s.qty) AS total_revenue,
+        SUM(s.price * s.qty) * 100.0 / SUM(SUM(s.price * s.qty)) OVER () AS percentage_split
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    JOIN balanced_tree.product_hierarchy ph ON pd.category_id = ph.id
+    GROUP BY ph.category_name
+),
+transaction_penetration AS (
+    SELECT 
+        pd.product_name,
+        COUNT(DISTINCT s.txn_id) AS transaction_count,
+        COUNT(DISTINCT s.txn_id) * 100.0 / (SELECT COUNT(DISTINCT txn_id) FROM balanced_tree.sales) AS penetration
+    FROM balanced_tree.sales s
+    JOIN balanced_tree.product_details pd ON s.prod_id = pd.product_id
+    GROUP BY pd.product_name
+),
+common_combinations AS (
+    SELECT 
+        comb.prod1, comb.prod2, comb.prod3, COUNT(*) AS combination_count
+    FROM (
+        SELECT 
+            t1.txn_id,
+            t1.prod_id AS prod1,
+            t2.prod_id AS prod2,
+            t3.prod_id AS prod3
+        FROM balanced_tree.sales t1
+        JOIN balanced_tree.sales t2 ON t1.txn_id = t2.txn_id AND t1.prod_id < t2.prod_id
+        JOIN balanced_tree.sales t3 ON t1.txn_id = t3.txn_id AND t2.prod_id < t3.prod_id
+        GROUP BY t1.txn_id, t1.prod_id, t2.prod_id, t3.prod_id
+    ) comb
+    GROUP BY comb.prod1, comb.prod2, comb.prod3
+    ORDER BY combination_count DESC
+    LIMIT 1
+)
+SELECT 
+    ts.total_quantity_sold,
+    ts.total_revenue_before_discount,
+    ts.total_discount_amount,
+    ut.unique_transactions,
+    appt.avg_unique_products_per_transaction,
+    pr.p25_revenue,
+    pr.p50_revenue,
+    pr.p75_revenue,
+    adpt.avg_discount_per_transaction,
+    ms.member,
+    ms.transaction_count,
+    ms.percentage_split,
+    armn.member,
+    armn.avg_revenue,
+    tpr.prod_id,
+    tpr.total_revenue,
+    sa.segment_name,
+    sa.total_quantity,
+    sa.total_revenue,
+    sa.total_discount,
+    tps.segment_name,
+    tps.product_name,
+    tps.total_quantity,
+    ca.category_name,
+    ca.total_quantity,
+    ca.total_revenue,
+    ca.total_discount,
+    tpc.category_name,
+    tpc.product_name,
+    tpc.total_quantity,
+    rsp.segment_name,
+    rsp.product_name,
+    rsp.total_revenue,
+    rsp.percentage_split,
+    rsc.category_name,
+    rsc.segment_name,
+    rsc.total_revenue,
+    rsc.percentage_split,
+    rscat.category_name,
+    rscat.total_revenue,
+    rscat.percentage_split,
+    tp.product_name,
+    tp.transaction_count,
+    tp.penetration,
+    cc.prod1,
+    cc.prod2,
+    cc.prod3,
+    cc.combination_count
+FROM 
+    total_sales ts,
+    unique_transactions ut,
+    average_products_per_transaction appt,
+    percentile_revenue pr,
+    average_discount_per_transaction adpt,
+    member_split ms,
+    average_revenue_member_non_member armn,
+    top_products_by_revenue tpr,
+    segment_analysis sa,
+    top_product_per_segment tps,
+    category_analysis ca,
+    top_product_per_category tpc,
+    revenue_split_by_product_segment rsp,
+    revenue_split_by_segment_category rsc,
+    revenue_split_by_category rscat,
+    transaction_penetration tp,
+    common_combinations cc;
